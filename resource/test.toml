@@ -1,0 +1,5 @@
+out_directory = "non-standard directory"
+
+[[task]]
+source = "masquerade"
+outputs = ["masquerade.docx", "masquerade.epub"]
