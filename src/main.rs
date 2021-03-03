@@ -4,13 +4,13 @@ use std::{
     io::{self, Cursor},
     iter::FromIterator,
     path::{Path, PathBuf},
-    process::Command,
+    process::{self, Command},
     slice,
 };
 
 use chrono::{DateTime, Utc};
 use clap::Clap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 type FileTime = DateTime<Utc>;
 
@@ -120,7 +120,7 @@ struct Task {
     outputs: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct Snapshot(Vec<(PathBuf, FileTime)>);
 
 impl Snapshot {
@@ -160,7 +160,12 @@ fn execute_task(task: &Task, configuration: &RuntimeConfiguration) -> io::Result
 
     for output in &task.outputs {
         let target_path = build_target_path(&build_path, &output)?;
-        let snapshot = load_build_snapshot(&target_path)?;
+        if !target_path.exists() {
+            fs::create_dir_all(&target_path)?;
+        }
+
+        let snapshot_path = target_path.join(".snapshot");
+        let snapshot = load_build_snapshot(&snapshot_path)?;
         if !should_rebuild(snapshot.as_ref(), &constituent_files) {
             continue;
         }
@@ -178,11 +183,14 @@ fn execute_task(task: &Task, configuration: &RuntimeConfiguration) -> io::Result
         let result = command.output()?;
         if result.status.success() {
             println!("{}", output);
+            let mut snapshot_file = File::create(snapshot_path)?;
+            serde_json::to_writer_pretty(&mut snapshot_file, &constituent_files)?;
         } else {
             eprintln!("Failed to generate {}", output);
             let stderr = io::stderr();
             let mut stderr = stderr.lock();
             io::copy(&mut Cursor::new(result.stderr), &mut stderr)?;
+            process::exit(1);
         }
     }
 
@@ -241,8 +249,7 @@ fn build_target_path(build_path: &Path, output: &str) -> io::Result<PathBuf> {
     Ok(build_path.join(extension))
 }
 
-fn load_build_snapshot(target_path: &Path) -> io::Result<Option<Snapshot>> {
-    let snapshot_path = target_path.join(".snapshot");
+fn load_build_snapshot(snapshot_path: &Path) -> io::Result<Option<Snapshot>> {
     if snapshot_path.exists() {
         let file = File::open(snapshot_path)?;
         Ok(Some(serde_json::from_reader(file)?))
@@ -253,7 +260,7 @@ fn load_build_snapshot(target_path: &Path) -> io::Result<Option<Snapshot>> {
 
 fn read_configuration() -> io::Result<Configuration> {
     let current_dir = env::current_dir()?;
-    let config_path = current_dir.join(".mdb.conf");
+    let config_path = current_dir.join("mdb.toml");
 
     if !config_path.exists() {
         Ok(Configuration::default())
