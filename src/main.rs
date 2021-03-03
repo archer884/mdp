@@ -1,8 +1,18 @@
-use core::slice;
-use std::{env, fs, io, path::Path, process::Command};
+use std::{
+    env,
+    fs::{self, File},
+    io::{self, Cursor},
+    iter::FromIterator,
+    path::{Path, PathBuf},
+    process::Command,
+    slice,
+};
 
+use chrono::{DateTime, Utc};
 use clap::Clap;
 use serde::Deserialize;
+
+type FileTime = DateTime<Utc>;
 
 // Fun fact: I have basically zero intention of using this facility.
 #[derive(Clap, Clone, Debug)]
@@ -25,20 +35,19 @@ struct Opts {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct Configuration {
-    // We'll have a conventional name (pub?) for the output
-    // directory, but it can be overridden.
     out_directory: Option<String>,
     #[serde(rename = "task")]
     tasks: Vec<Task>,
+    reference_doc: Option<String>,
 }
 
 impl Configuration {
     /// Combine configuration with command line options.
-    fn with_opts(mut self, opts: Opts) -> Configuration {
+    fn with_opts(mut self, opts: Opts) -> io::Result<RuntimeConfiguration> {
         // The idea here is to take in the options object and return a new
         // configuration object wherein opts values have been allowed to
         // override configuration values.
-        Configuration {
+        let configuration = Configuration {
             out_directory: opts.out_directory.or(self.out_directory),
             tasks: match opts.path {
                 // If the user has provided a path, it will override any
@@ -68,18 +77,37 @@ impl Configuration {
                     }
                 }
             },
-        }
-    }
+            reference_doc: opts.reference_doc,
+        };
 
+        Ok(RuntimeConfiguration {
+            current_dir: env::current_dir()?,
+            configuration,
+        })
+    }
+}
+
+struct RuntimeConfiguration {
+    current_dir: PathBuf,
+    configuration: Configuration,
+}
+
+impl RuntimeConfiguration {
     fn tasks(&self) -> slice::Iter<Task> {
-        self.tasks.iter()
+        self.configuration.tasks.iter()
     }
 
-    fn out_directory(&self) -> &Path {
-        self.out_directory
+    fn source_path(&self, source: impl AsRef<Path>) -> PathBuf {
+        self.current_dir.join(source)
+    }
+
+    fn build_path(&self, source: impl AsRef<Path>) -> PathBuf {
+        self.configuration
+            .out_directory
             .as_ref()
             .map(Path::new)
             .unwrap_or_else(|| Path::new("pub"))
+            .join(source)
     }
 }
 
@@ -92,6 +120,23 @@ struct Task {
     outputs: Vec<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+struct Snapshot(Vec<(PathBuf, FileTime)>);
+
+impl Snapshot {
+    fn args(&self) -> Vec<&Path> {
+        self.0.iter().map(|x| x.0.as_ref()).collect()
+    }
+}
+
+impl FromIterator<(PathBuf, FileTime)> for Snapshot {
+    fn from_iter<T: IntoIterator<Item = (PathBuf, FileTime)>>(iter: T) -> Self {
+        let mut inner: Vec<_> = iter.into_iter().collect();
+        inner.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        Snapshot(inner)
+    }
+}
+
 fn main() -> io::Result<()> {
     // WARNING: THE FOLLOWING COMMAND DOES NOT WORK, BECAUSE
     // PANDOC ALLOWS FOR ONLY A SINGLE OUTPUT AT A TIME.
@@ -101,9 +146,109 @@ fn main() -> io::Result<()> {
     //     .output()
     //     .unwrap();
 
-    let configuration = read_configuration()?.with_opts(Opts::parse());
+    let configuration = read_configuration()?.with_opts(Opts::parse())?;
+    for task in configuration.tasks() {
+        execute_task(task, &configuration)?;
+    }
 
     Ok(())
+}
+
+fn execute_task(task: &Task, configuration: &RuntimeConfiguration) -> io::Result<()> {
+    let constituent_files = list_files(configuration.source_path(&task.source))?;
+    let build_path = configuration.build_path(&task.source);
+
+    for output in &task.outputs {
+        let target_path = build_target_path(&build_path, &output)?;
+        let snapshot = load_build_snapshot(&target_path)?;
+        if !should_rebuild(snapshot.as_ref(), &constituent_files) {
+            continue;
+        }
+
+        let mut command = Command::new("pandoc");
+        command
+            .args(&constituent_files.args())
+            .arg("-o")
+            .arg(target_path.join(output));
+
+        if let Some(reference_doc) = try_get_reference_doc(&configuration)? {
+            command.arg("--reference-doc").arg(reference_doc);
+        }
+
+        let result = command.output()?;
+        if result.status.success() {
+            println!("{}", output);
+        } else {
+            eprintln!("Failed to generate {}", output);
+            let stderr = io::stderr();
+            let mut stderr = stderr.lock();
+            io::copy(&mut Cursor::new(result.stderr), &mut stderr)?;
+        }
+    }
+
+    Ok(())
+}
+
+// This looks like a mess to me, but maybe it'll work.
+fn try_get_reference_doc(configuration: &RuntimeConfiguration) -> io::Result<Option<PathBuf>> {
+    if let Some(path) = &configuration.configuration.reference_doc {
+        let path = Path::new(path);
+        if !path.exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "missing reference document",
+            ));
+        }
+
+        Ok(Some(path.into()))
+    } else {
+        let path = configuration.current_dir.join("style/style.docx");
+        if path.exists() {
+            return Ok(Some(path));
+        }
+        Ok(None)
+    }
+}
+
+fn should_rebuild(snapshot: Option<&Snapshot>, constituent_files: &Snapshot) -> bool {
+    snapshot
+        .map(|snapshot| snapshot != constituent_files)
+        .unwrap_or(true)
+}
+
+fn list_files(path: impl AsRef<Path>) -> io::Result<Snapshot> {
+    Ok(fs::read_dir(path)?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let metadata = entry.metadata().ok()?;
+            if metadata.is_file() {
+                Some((entry.path(), metadata.modified().ok()?.into()))
+            } else {
+                None
+            }
+        })
+        .collect())
+}
+
+fn build_target_path(build_path: &Path, output: &str) -> io::Result<PathBuf> {
+    let output_filename = Path::new(output);
+    let extension = output_filename.extension().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            "output lacks valid filename extension",
+        )
+    })?;
+    Ok(build_path.join(extension))
+}
+
+fn load_build_snapshot(target_path: &Path) -> io::Result<Option<Snapshot>> {
+    let snapshot_path = target_path.join(".snapshot");
+    if snapshot_path.exists() {
+        let file = File::open(snapshot_path)?;
+        Ok(Some(serde_json::from_reader(file)?))
+    } else {
+        Ok(None)
+    }
 }
 
 fn read_configuration() -> io::Result<Configuration> {
