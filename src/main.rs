@@ -159,13 +159,15 @@ fn execute_task(task: &Task, configuration: &RuntimeConfiguration) -> io::Result
 
     for output in &task.outputs {
         let target_path = build_target_path(&build_path, &output)?;
+        let output_file_path = target_path.join(output);
+
         if !target_path.exists() {
             fs::create_dir_all(&target_path)?;
         }
 
         let snapshot_path = target_path.join(".snapshot");
         let snapshot = load_build_snapshot(&snapshot_path)?;
-        if !should_rebuild(snapshot.as_ref(), &constituent_files) {
+        if output_file_path.exists() && !should_rebuild(snapshot.as_ref(), &constituent_files) {
             continue;
         }
 
@@ -173,7 +175,7 @@ fn execute_task(task: &Task, configuration: &RuntimeConfiguration) -> io::Result
         command
             .args(&constituent_files.args())
             .arg("-o")
-            .arg(target_path.join(output));
+            .arg(&output_file_path);
 
         if let Some(reference_doc) = try_get_reference_doc(&configuration)? {
             command.arg("--reference-doc").arg(reference_doc);
