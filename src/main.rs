@@ -44,9 +44,7 @@ struct Configuration {
 impl Configuration {
     /// Combine configuration with command line options.
     fn with_opts(mut self, opts: Opts) -> io::Result<RuntimeConfiguration> {
-        // The idea here is to take in the options object and return a new
-        // configuration object wherein opts values have been allowed to
-        // override configuration values.
+        let current_dir = env::current_dir()?;
         let configuration = Configuration {
             out_directory: opts.out_directory.or(self.out_directory),
             tasks: match opts.path {
@@ -54,7 +52,7 @@ impl Configuration {
                 // configured tasks.
                 Some(path) => vec![Task {
                     source: path,
-                    outputs: opts.outputs,
+                    outputs: opts.outputs.into_iter().map(PathBuf::from).collect(),
                 }],
 
                 // If the user has not provided a path, tasks will be drawn
@@ -62,12 +60,21 @@ impl Configuration {
                 // be overridden by configuration.
                 None => {
                     if self.tasks.is_empty() {
+                        let mut outputs: Vec<_> =
+                            opts.outputs.into_iter().map(PathBuf::from).collect();
+                        if outputs.is_empty() {
+                            if let Some(parent) = current_dir.parent() {
+                                // I don't see how this can fail.
+                                let stripped = current_dir.strip_prefix(parent).unwrap();
+                                outputs.push(stripped.with_extension("docx"))
+                            }
+                        }
                         vec![Task {
                             source: String::from("src"),
-                            outputs: opts.outputs,
+                            outputs,
                         }]
                     } else {
-                        let outputs = opts.outputs;
+                        let outputs: Vec<_> = opts.outputs.into_iter().map(PathBuf::from).collect();
                         if !outputs.is_empty() {
                             self.tasks
                                 .iter_mut()
@@ -81,7 +88,7 @@ impl Configuration {
         };
 
         Ok(RuntimeConfiguration {
-            current_dir: env::current_dir()?,
+            current_dir,
             configuration,
         })
     }
@@ -117,7 +124,7 @@ struct Task {
     // a book may be configured to produce both a docx and
     // epub output.
     source: String,
-    outputs: Vec<String>,
+    outputs: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -138,14 +145,6 @@ impl FromIterator<(PathBuf, FileTime)> for Snapshot {
 }
 
 fn main() -> io::Result<()> {
-    // WARNING: THE FOLLOWING COMMAND DOES NOT WORK, BECAUSE
-    // PANDOC ALLOWS FOR ONLY A SINGLE OUTPUT AT A TIME.
-    // let command = Command::new("pandoc")
-    //     .arg("./README.md")
-    //     .args(&["-o", "readme.docx", "-o", "readme.epub"])
-    //     .output()
-    //     .unwrap();
-
     let configuration = read_configuration()?.with_opts(Opts::parse())?;
     for task in configuration.tasks() {
         execute_task(task, &configuration)?;
@@ -182,11 +181,11 @@ fn execute_task(task: &Task, configuration: &RuntimeConfiguration) -> io::Result
 
         let result = command.output()?;
         if result.status.success() {
-            println!("{}", output);
+            println!("{}", output.display());
             let mut snapshot_file = File::create(snapshot_path)?;
             serde_json::to_writer_pretty(&mut snapshot_file, &constituent_files)?;
         } else {
-            eprintln!("Failed to generate {}", output);
+            eprintln!("Failed to generate {}", output.display());
             let stderr = io::stderr();
             let mut stderr = stderr.lock();
             io::copy(&mut Cursor::new(result.stderr), &mut stderr)?;
@@ -238,7 +237,7 @@ fn list_files(path: impl AsRef<Path>) -> io::Result<Snapshot> {
         .collect())
 }
 
-fn build_target_path(build_path: &Path, output: &str) -> io::Result<PathBuf> {
+fn build_target_path(build_path: &Path, output: &Path) -> io::Result<PathBuf> {
     let output_filename = Path::new(output);
     let extension = output_filename.extension().ok_or_else(|| {
         io::Error::new(
