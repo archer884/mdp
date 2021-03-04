@@ -260,7 +260,7 @@ fn load_build_snapshot(snapshot_path: &Path) -> io::Result<Option<Snapshot>> {
 
 fn read_configuration() -> io::Result<Configuration> {
     let current_dir = env::current_dir()?;
-    let config_path = current_dir.join("mdb.toml");
+    let config_path = current_dir.join("mdp.toml");
 
     if !config_path.exists() {
         Ok(Configuration::default())
