@@ -183,9 +183,9 @@ fn execute_task(task: &Task, configuration: &RuntimeConfiguration) -> io::Result
 
         let result = command.output()?;
         if result.status.success() {
-            println!("{}", output.display());
             let mut snapshot_file = File::create(snapshot_path)?;
             serde_json::to_writer_pretty(&mut snapshot_file, &constituent_files)?;
+            println!("{}", output_file_path.display());
         } else {
             eprintln!("Failed to generate {}", output.display());
             let stderr = io::stderr();
