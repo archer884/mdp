@@ -115,12 +115,21 @@ impl RuntimeConfiguration {
     }
 
     fn build_path(&self, source: impl AsRef<Path>) -> PathBuf {
-        self.configuration
+        let source = source.as_ref();
+        let default_source_path = Path::new("src");
+        let base_build_path = self
+            .configuration
             .out_directory
             .as_ref()
             .map(Path::new)
-            .unwrap_or_else(|| Path::new("pub"))
-            .join(source)
+            .unwrap_or_else(|| Path::new("pub"));
+
+        // Omit 'src' from output hierarchy if using default output
+        if self.configuration.tasks.len() == 1 && source == default_source_path {
+            base_build_path.to_owned()
+        } else {
+            base_build_path.join(source)
+        }
     }
 }
 
@@ -163,17 +172,17 @@ fn execute_task(task: &Task, configuration: &RuntimeConfiguration) -> io::Result
     let constituent_files = list_files(configuration.source_path(&task.source))?;
     let build_path = configuration.build_path(&task.source);
 
+    if !build_path.exists() {
+        fs::create_dir_all(&build_path)?;
+    }
+
+    let snapshot_path = build_path.join(".snapshot");
+    let snapshot = load_build_snapshot(&snapshot_path)?;
+    let rebuild = should_rebuild(snapshot.as_ref(), &constituent_files);
+
     for output in &task.outputs {
-        let target_path = build_target_path(&build_path, &output)?;
-        let output_file_path = target_path.join(output);
-
-        if !target_path.exists() {
-            fs::create_dir_all(&target_path)?;
-        }
-
-        let snapshot_path = target_path.join(".snapshot");
-        let snapshot = load_build_snapshot(&snapshot_path)?;
-        if output_file_path.exists() && !should_rebuild(snapshot.as_ref(), &constituent_files) {
+        let output_path = build_path.join(output);
+        if !rebuild && output_path.exists() {
             continue;
         }
 
@@ -181,7 +190,7 @@ fn execute_task(task: &Task, configuration: &RuntimeConfiguration) -> io::Result
         command
             .args(&constituent_files.args())
             .arg("-o")
-            .arg(&output_file_path);
+            .arg(&output_path);
 
         if let Some(reference_doc) = try_get_reference_doc(&configuration)? {
             command.arg("--reference-doc").arg(reference_doc);
@@ -189,9 +198,7 @@ fn execute_task(task: &Task, configuration: &RuntimeConfiguration) -> io::Result
 
         let result = command.output()?;
         if result.status.success() {
-            let mut snapshot_file = File::create(snapshot_path)?;
-            serde_json::to_writer_pretty(&mut snapshot_file, &constituent_files)?;
-            println!("{}", output_file_path.display());
+            println!("{}", output_path.display());
         } else {
             eprintln!("Failed to generate {}", output.display());
             let stderr = io::stderr();
@@ -200,6 +207,9 @@ fn execute_task(task: &Task, configuration: &RuntimeConfiguration) -> io::Result
             process::exit(1);
         }
     }
+
+    let mut snapshot_file = File::create(&snapshot_path)?;
+    serde_json::to_writer_pretty(&mut snapshot_file, &constituent_files)?;
 
     if configuration.open {
         Command::new("open").arg(&build_path).output()?;
@@ -247,17 +257,6 @@ fn list_files(path: impl AsRef<Path>) -> io::Result<Snapshot> {
             }
         })
         .collect())
-}
-
-fn build_target_path(build_path: &Path, output: &Path) -> io::Result<PathBuf> {
-    let output_filename = Path::new(output);
-    let extension = output_filename.extension().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            "output lacks valid filename extension",
-        )
-    })?;
-    Ok(build_path.join(extension))
 }
 
 fn load_build_snapshot(snapshot_path: &Path) -> io::Result<Option<Snapshot>> {
