@@ -31,6 +31,10 @@ struct Opts {
     /// styling document
     #[clap(long = "reference-doc")]
     reference_doc: Option<String>,
+
+    /// Open output directory after generating
+    #[clap(long)]
+    open: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -90,6 +94,7 @@ impl Configuration {
         Ok(RuntimeConfiguration {
             current_dir,
             configuration,
+            open: opts.open,
         })
     }
 }
@@ -97,6 +102,7 @@ impl Configuration {
 struct RuntimeConfiguration {
     current_dir: PathBuf,
     configuration: Configuration,
+    open: bool,
 }
 
 impl RuntimeConfiguration {
@@ -193,6 +199,10 @@ fn execute_task(task: &Task, configuration: &RuntimeConfiguration) -> io::Result
             io::copy(&mut Cursor::new(result.stderr), &mut stderr)?;
             process::exit(1);
         }
+    }
+
+    if configuration.open {
+        Command::new("open").arg(&build_path).output()?;
     }
 
     Ok(())
