@@ -9,13 +9,13 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use clap::Clap;
 use serde::{Deserialize, Serialize};
+use structopt::StructOpt;
 
 type FileTime = DateTime<Utc>;
 
 // Fun fact: I have basically zero intention of using this facility.
-#[derive(Clap, Clone, Debug)]
+#[derive(Clone, Debug, structopt::StructOpt)]
 struct Opts {
     /// directory containing pandoc source files
     path: Option<String>,
@@ -25,15 +25,15 @@ struct Opts {
 
     /// the output directory; generated outputs will be
     /// placed in here
-    #[clap(long = "out-directory")]
+    #[structopt(long = "out-directory")]
     out_directory: Option<String>,
 
     /// styling document
-    #[clap(long = "reference-doc")]
+    #[structopt(long = "reference-doc")]
     reference_doc: Option<String>,
 
     /// Open output directory after generating
-    #[clap(long)]
+    #[structopt(long)]
     open: bool,
 }
 
@@ -160,7 +160,7 @@ impl FromIterator<(PathBuf, FileTime)> for Snapshot {
 }
 
 fn main() -> io::Result<()> {
-    let configuration = read_configuration()?.with_opts(Opts::parse())?;
+    let configuration = read_configuration()?.with_opts(Opts::from_args())?;
     for task in configuration.tasks() {
         execute_task(task, &configuration)?;
     }
